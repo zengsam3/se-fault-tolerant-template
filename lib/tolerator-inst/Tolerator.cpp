@@ -48,6 +48,7 @@ Tolerator::runOnModule(Module& m) {
     );
 
   for (Function &F : m) {
+    StringRef name = F.getName();
     if (F.isDeclaration()) continue;
     if (name.startswith("handle_invalid_")) continue;
     for (BasicBlock &BB : F) {
