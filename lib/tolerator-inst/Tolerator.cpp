@@ -6,6 +6,8 @@
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/Passes/PassPlugin.h"
+#include "llvm/Passes/PassBuilder.h"
 #include "Tolerator.h"
 
 
@@ -38,15 +40,12 @@ Tolerator::runOnModule(Module& m) {
   FunctionCallee trapRead = m.getOrInsertFunction(
     "handle_invalid_read",
     FunctionType::get(voidTy, false));
-
   FunctionCallee trapWrite = m.getOrInsertFunction(
     "handle_invalid_write",
     FunctionType::get(voidTy, false));
-
   FunctionCallee trapFree = m.getOrInsertFunction(
     "handle_invalid_free",
     FunctionType::get(voidTy, false));
-
   FunctionCallee trapDiv = m.getOrInsertFunction(
     "handle_division_by_zero",
     FunctionType::get(voidTy, false));
@@ -55,7 +54,6 @@ Tolerator::runOnModule(Module& m) {
     for (BasicBlock &BB : F) {
       for (Instruction &I : BB) {
         IRBuilder<> B(&I);
-
         if (isa<LoadInst>(&I)) {
           B.CreateCall(trapRead);
         } else if (isa<StoreInst>(&I)) {
@@ -90,7 +88,27 @@ Tolerator::runOnModule(Module& m) {
     }
   }
 
-
   return true;
+}
+
+extern "C" PassPluginLibraryInfo llvmGetPassPluginInfo() {
+  return {
+    LLVM_PLUGIN_API_VERSION,
+    "Tolerator",
+    "0.1",
+    [](PassBuilder &PB) {
+      PB.registerPipelineParsingCallback(
+        [](StringRef Name,
+           ModulePassManager &MPM,
+           ArrayRef<PassBuilder::PipelineElement>) {
+          if (Name == "tolerator") {
+            MPM.addPass(tolerator::Tolerator());
+            return true;
+          }
+          return false;
+        }
+      );
+    }
+  };
 }
 
