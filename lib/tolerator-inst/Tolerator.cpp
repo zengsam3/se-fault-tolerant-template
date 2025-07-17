@@ -27,6 +27,40 @@ Tolerator::runOnModule(Module& m) {
   LLVMContext &Ctx = m.getContext();
   IRBuilder<> Builder(Ctx);
 
+  SmallVector<ObjInfo,16> Locals, Globals, Heaps;
+
+  for (Function &F : m) {
+    for (BasicBlock &BB : F)
+      for (Instruction &I : BB)
+        if (AllocaInst *AI = dyn_cast<AllocaInst>(&I)) {
+          uint64_t sz = m.getDataLayout().getTypeAllocSize(AI->getAllocatedType());
+          Locals.push_back({AI, sz});
+        }
+  }
+
+
+  for (GlobalVariable &G : m.globals()) {
+    if (!G.isDeclaration()) {
+      uint64_t sz = m.getDataLayout().getTypeAllocSize(G.getValueType());
+      Globals.push_back({&G, sz});
+    }
+  }
+
+
+  SmallVector<CallInst*,8> Mallocs;
+
+  for (Function &F : m)
+    for (BasicBlock &BB : F)
+      for (Instruction &I : BB)
+        if (auto *CI = dyn_cast<CallInst>(&I))
+          if (CI->getCalledFunction() && CI->getCalledFunction()->getName() == "malloc")
+            Mallocs.push_back(CI);
+
+  for (CallInst *CI : Mallocs)
+    if (auto *CIarg = dyn_cast<ConstantInt>(CI->getArgOperand(0)))
+      Heaps.push_back({CI, CIarg->getZExtValue()});
+
+
   FunctionCallee H_read = m.getOrInsertFunction(
         "handle_invalid_read",
         FunctionType::get(Builder.getVoidTy(), false)
@@ -71,51 +105,58 @@ Tolerator::runOnModule(Module& m) {
             BasicBlock *ErrBB = BasicBlock::Create(Ctx, OrigBB->getName() + ".err", OrigBB->getParent(), ContBB);
 
             Builder.SetInsertPoint(ErrBB);
-            if (dyn_cast<LoadInst>(I))
-                Builder.CreateCall(H_read);
-            else if (dyn_cast<StoreInst>(I))
-                Builder.CreateCall(H_write);
-            else if (CallInst *CI = dyn_cast<CallInst>(I))
-                if (CI->getCalledFunction() && CI->getCalledFunction()->getName() == "free")
-                    Builder.CreateCall(H_free);
-                else
-                    Builder.CreateCall(H_div0);
-            else
+            if (isa<LoadInst>(I))       Builder.CreateCall(H_read);
+            else if (isa<StoreInst>(I)) Builder.CreateCall(H_write);
+            else if (CallInst *CI = dyn_cast<CallInst>(I)) {
+              if (CI->getCalledFunction()->getName() == "free")
+                Builder.CreateCall(H_free);
+              else
                 Builder.CreateCall(H_div0);
+            } else {
+              Builder.CreateCall(H_div0);
+            }
             Builder.CreateUnreachable();
 
             Builder.SetInsertPoint(OrigBB);
-            Value *Cond = nullptr;
-            if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
-                Cond = Builder.CreateICmpEQ(
-                    LI->getPointerOperand(),
-                    Constant::getNullValue(LI->getPointerOperand()->getType())
-                );
-            } else if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
-                Cond = Builder.CreateICmpEQ(
-                    SI->getPointerOperand(),
-                    Constant::getNullValue(SI->getPointerOperand()->getType())
-                );
-            } else if (CallInst *CI = dyn_cast<CallInst>(I)) {
-                Value *Ptr = CI->getArgOperand(0);
-                Cond = Builder.CreateICmpNE(
-                    Ptr,
-                    Constant::getNullValue(Ptr->getType())
-                );
-            } else {
-                BinaryOperator *BOp = cast<BinaryOperator>(I);
-                Value *Divisor = BOp->getOperand(1);
-                Cond = Builder.CreateICmpEQ(
-                    Divisor,
-                    ConstantInt::get(Divisor->getType(), 0)
-                );
-            }
-            Builder.CreateCondBr(Cond, ErrBB, ContBB);
-        }
-    }
+            Value *ptrOrDiv = nullptr;
+            if (LoadInst *LI = dyn_cast<LoadInst>(I))
+              ptrOrDiv = LI->getPointerOperand();
+            else if (StoreInst *SI = dyn_cast<StoreInst>(I))
+              ptrOrDiv = SI->getPointerOperand();
+            else if (BinaryOperator *BOp = dyn_cast<BinaryOperator>(I))
+              ptrOrDiv = BOp->getOperand(1);
+            else if (CallInst *CI = dyn_cast<CallInst>(I))
+              ptrOrDiv = CI->getArgOperand(0);
 
+            Value *inRange = nullptr;
+            if (isa<LoadInst>(I) || isa<StoreInst>(I) ||
+                (isa<CallInst>(I) && cast<CallInst>(I)->getCalledFunction()->getName() == "free")) {
+              Value *nullCheck = Builder.CreateICmpEQ(ptrOrDiv, Constant::getNullValue(ptrOrDiv->getType()));
+              inRange = nullCheck;
+              for (auto &O : Locals) {
+                Value *lo = Builder.CreateICmpUGE(ptrOrDiv, O.base);
+                Value *hi = Builder.CreateICmpULT(ptrOrDiv,
+                                Builder.CreateConstantGEP1_64(O.base, O.size));
+                inRange = Builder.CreateOr(inRange, Builder.CreateAnd(lo, hi));
+              }
+              for (auto &O : Globals) {
+                Value *lo = Builder.CreateICmpUGE(ptrOrDiv, O.base);
+                Value *hi = Builder.CreateICmpULT(ptrOrDiv,
+                                Builder.CreateConstantGEP1_64(O.base, O.size));
+                inRange = Builder.CreateOr(inRange, Builder.CreateAnd(lo, hi));
+              }
+              for (auto &O : Heaps) {
+                Value *eq = Builder.CreateICmpEQ(ptrOrDiv, O.base);
+                inRange = Builder.CreateOr(inRange, eq);
+              }
+            } else {
+              Value *zero = ConstantInt::get(ptrOrDiv->getType(), 0);
+              inRange = Builder.CreateICmpNE(ptrOrDiv, zero);
+            }
+
+            Value *bad = Builder.CreateNot(inRange);
+            Builder.CreateCondBr(bad, ErrBB, ContBB);
+          }
+        }
   return true;
 }
-
-
-
