@@ -48,7 +48,7 @@ Tolerator::runOnModule(Module& m) {
     );
 
 
-    
+  return true;
 }
 
 
