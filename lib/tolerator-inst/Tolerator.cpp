@@ -25,6 +25,7 @@ char Tolerator::ID = 0;
 bool
 Tolerator::runOnModule(Module& m) {
   auto& context = m.getContext();
+  Type *voidTy = Type::getVoidTy(Ctx);
 
   // This analysis just prints a message when the program starts or exits.
   // You should modify this code as you see fit.
@@ -102,7 +103,7 @@ extern "C" PassPluginLibraryInfo llvmGetPassPluginInfo() {
            ModulePassManager &MPM,
            ArrayRef<PassBuilder::PipelineElement>) {
           if (Name == "tolerator") {
-            MPM.addPass(tolerator::Tolerator());
+            MPM.addPass(Tolerator(Tolerator::AnalysisType::Log));
             return true;
           }
           return false;
