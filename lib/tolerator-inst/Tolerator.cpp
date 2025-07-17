@@ -49,6 +49,7 @@ Tolerator::runOnModule(Module& m) {
 
   for (Function &F : m) {
     if (F.isDeclaration()) continue;
+    if (name.startswith("handle_invalid_")) continue;
     for (BasicBlock &BB : F) {
       SmallVector<Instruction*, 8> WorkList;
       for (Instruction &I : BB) {
