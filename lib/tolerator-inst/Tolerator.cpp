@@ -52,19 +52,22 @@ Tolerator::runOnModule(Module& m) {
     for (BasicBlock &BB : F) {
       SmallVector<Instruction*, 8> WorkList;
       for (Instruction &I : BB) {
-        if (isa<LoadInst>(&I) ||
-            isa<StoreInst>(&I) ||
-            (auto *CI = dyn_cast<CallInst>(&I) &&
-             CI->getCalledFunction() &&
-             CI->getCalledFunction()->getName() == "free") ||
-            isa<BinaryOperator>(&I) &&
-              (I.getOpcode() == Instruction::SDiv ||
-               I.getOpcode() == Instruction::UDiv ||
-               I.getOpcode() == Instruction::FDiv)) {
+        if (isa<LoadInst>(&I) || isa<StoreInst>(&I)) {
           WorkList.push_back(&I);
+        } else if (CallInst *CI = dyn_cast<CallInst>(&I)) {
+          if (Function *CF = CI->getCalledFunction();
+              CF && CF->getName() == "free")
+            WorkList.push_back(&I);
+        } else if (BinaryOperator *BO = dyn_cast<BinaryOperator>(&I)) {
+          unsigned opc = BO->getOpcode();
+          if (opc == Instruction::SDiv ||
+              opc == Instruction::UDiv ||
+              opc == Instruction::FDiv)
+            WorkList.push_back(&I);
         }
       }
-      for (Instruction *I : reverse(WorkList)) {
+      for (auto it = WorkList.rbegin(); it != WorkList.rend(); ++it) {
+        Instruction *I = *it;
         BasicBlock *OrigBB = I->getParent();
         BasicBlock *ContBB = OrigBB->splitBasicBlock(I, OrigBB->getName() + ".cont");
         OrigBB->getTerminator()->eraseFromParent();
@@ -75,7 +78,7 @@ Tolerator::runOnModule(Module& m) {
           ErrB.CreateCall(H_read);
         else if (isa<StoreInst>(I))
           ErrB.CreateCall(H_write);
-        else if (auto *CI = dyn_cast<CallInst>(I))
+        else if (dyn_cast<CallInst>(I))
           ErrB.CreateCall(H_free);
         else
           ErrB.CreateCall(H_div0);
@@ -83,26 +86,26 @@ Tolerator::runOnModule(Module& m) {
 
         IRBuilder<> CondB(OrigBB);
         Value *Cond = nullptr;
-        if (auto *LI = dyn_cast<LoadInst>(I)) {
+        if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
           Cond = CondB.CreateICmpEQ(
             LI->getPointerOperand(),
             Constant::getNullValue(LI->getPointerOperand()->getType()));
-        } else if (auto *SI = dyn_cast<StoreInst>(I)) {
+        } else if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
           Cond = CondB.CreateICmpEQ(
             SI->getPointerOperand(),
             Constant::getNullValue(SI->getPointerOperand()->getType()));
-        } else if (auto *CI = dyn_cast<CallInst>(I)) {
+        } else if (CallInst *CI = dyn_cast<CallInst>(I)) {
           Value *Ptr = CI->getArgOperand(0);
           Cond = CondB.CreateICmpEQ(
             Ptr,
             Constant::getNullValue(Ptr->getType()));
         } else {
-          auto *BOp = cast<BinaryOperator>(I);
-          Value *Divisor = BOp->getOperand(1);
-          if (BOp->getOpcode() == Instruction::FDiv)
+          BinaryOperator *BO = cast<BinaryOperator>(I);
+          Value *Divisor = BO->getOperand(1);
+          if (BO->getOpcode() == Instruction::FDiv)
             Cond = CondB.CreateFCmpUEQ(
               Divisor,
-              ConstantFP::getZeroValueForNegation(Divisor->getType()));
+              ConstantFP::get(Divisor->getType(), 0.0));
           else
             Cond = CondB.CreateICmpEQ(
               Divisor,
@@ -116,4 +119,4 @@ Tolerator::runOnModule(Module& m) {
   return true;
 }
 
-static RegisterPass<Tolerator> X("tolerator", "Tolerator Pass", false, false);
+static RegisterPass<tolerator::Tolerator> X("tolerator", "Tolerator Pass", false, false);
